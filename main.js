@@ -156,11 +156,13 @@ function placeTags(tags) {
 /* ---------- 視覚トラッキング（テンプレートマッチング） ----------
    撮影フレームから各タグ位置の画像パッチを切り出し、現在の映像の中で
    正規化相関（NCC）が最大の位置を定期的に探してアンカーを追従させる。
-   回転だけでなく移動にも追従する。見失いが続くタグは隠し、全て見失うか
+   回転だけでなく移動にも追従する。見失いが続くタグはいったん隠すが、
+   低頻度の全画面スキャンで再検出を続け、見つけたら再表示する。
    処理負荷が高い状態が続いたら追従を止めて全ラベルを隠す（発熱・重さ対策）。 */
 const TRACK_W = 192;          // 追跡用の作業解像度（横px）
 const TRACK_INTERVAL = 100;   // 追跡間隔(ms)
 const TRACK_ACCEPT = 0.55;    // これ未満の相関は「見失い」
+const TRACK_REACQUIRE = 0.65; // 再検出のしきい値（誤って別物に復活しないよう通常より厳しめ）
 const TRACK_LOST_LIMIT = 10;  // 見失いが続いたらそのタグを隠す（約1秒分）
 const TRACK_SLOW_LIMIT = 70;  // 1tickの平均処理時間(ms)がこれを超え続けたら全停止
 const trackCanvas = document.createElement('canvas');
@@ -169,6 +171,9 @@ let captureGray = null; // 撮影時点のグレースケールフレーム {dat
 let trackers = [];
 let trackTimer = null;
 let trackCostEma = 0;
+let tickCount = 0;
+let reacquireIdx = 0;
+let allLostShown = false;
 
 function grabGray() {
   if (!video.videoWidth) return null;
@@ -273,6 +278,39 @@ function updateTemplate(frame, tr, x0, y0) {
   tpl.varT = Math.max(1, sum2 / tpl.n - tpl.mean * tpl.mean);
 }
 
+// 再検出用：フレーム全体からテンプレートを探す（粗く走査→近傍を精密化）
+function searchFullFrame(frame, tr) {
+  const tpl = tr.tpl;
+  const othersPx = trackers
+    .filter((t) => t !== tr && t.state === 'active')
+    .map((t) => ({ x: t.u * frame.w, y: t.v * frame.h }));
+  const scoreAt = (x, y) => {
+    let s = nccAt(frame, tpl, x, y);
+    const px = x + tpl.offX, py = y + tpl.offY;
+    for (const o of othersPx) {
+      if (Math.abs(px - o.x) < 12 && Math.abs(py - o.y) < 12) { s *= 0.8; break; }
+    }
+    return s;
+  };
+  let best = null;
+  for (let y = 0; y + tpl.th <= frame.h; y += 3) {
+    for (let x = 0; x + tpl.tw <= frame.w; x += 3) {
+      const s = scoreAt(x, y);
+      if (!best || s > best.score) best = { score: s, x, y };
+    }
+  }
+  if (!best) return null;
+  const bx = best.x, by = best.y;
+  for (let y = by - 2; y <= by + 2; y++) {
+    for (let x = bx - 2; x <= bx + 2; x++) {
+      if (x < 0 || y < 0 || x + tpl.tw > frame.w || y + tpl.th > frame.h) continue;
+      const s = scoreAt(x, y);
+      if (s > best.score) best = { score: s, x, y };
+    }
+  }
+  return { score: best.score, u: (best.x + tpl.offX) / frame.w, v: (best.y + tpl.offY) / frame.h, x: best.x, y: best.y };
+}
+
 function applyAnchorPos(tr) {
   const ax = (tr.u - 0.5) * 4.6;
   const ay = (0.5 - tr.v) * 3.4;
@@ -293,13 +331,18 @@ function applyAnchorPos(tr) {
 
 function trackTick() {
   if (!stream || video.readyState < 2) return;
+  tickCount++;
+  const hasActive = trackers.some((t) => t.state === 'active');
+  const lostList = trackers.filter((t) => t.state === 'lost');
+  const scanTick = lostList.length > 0 && tickCount % 8 === 0; // 再検出スキャンは約0.8秒に1回だけ（負荷分散）
+  if (!hasActive && !scanTick) return;
   const frame = grabGray();
   if (!frame) return;
   const t0 = performance.now();
   for (const tr of trackers) {
-    if (!tr.active) continue;
+    if (tr.state !== 'active') continue;
     const othersPx = trackers
-      .filter((t) => t !== tr && t.active)
+      .filter((t) => t !== tr && t.state === 'active')
       .map((t) => ({ x: t.u * frame.w, y: t.v * frame.h }));
     const hit = searchTemplate(frame, tr, othersPx);
     if (hit && hit.score >= TRACK_ACCEPT) {
@@ -313,13 +356,34 @@ function trackTick() {
       if (hit.score >= 0.75) updateTemplate(frame, tr, hit.x, hit.y);
     } else {
       tr.lost++;
-      if (tr.lost >= TRACK_LOST_LIMIT) { tr.active = false; tr.anchor.visible = false; }
+      if (tr.lost >= TRACK_LOST_LIMIT) { tr.state = 'lost'; tr.anchor.visible = false; }
+    }
+  }
+  // 再検出：隠れたタグを1つずつ全画面から探し、見つけたら再表示する
+  if (scanTick) {
+    const tr = lostList[reacquireIdx++ % lostList.length];
+    if (tr && tr.state === 'lost') {
+      const hit = searchFullFrame(frame, tr);
+      if (hit && hit.score >= TRACK_REACQUIRE) {
+        tr.state = 'active';
+        tr.lost = 0;
+        tr.u = hit.u;
+        tr.v = hit.v;
+        tr.anchor.visible = true;
+        applyAnchorPos(tr);
+        if (hit.score >= 0.75) updateTemplate(frame, tr, hit.x, hit.y);
+        if (!trackers.some((t) => t.state === 'lost')) allLostShown = false;
+        if ($('status-chip').textContent.includes('再検出中')) $('status-chip').textContent = '拡張翻訳を表示中';
+      }
     }
   }
   const cost = performance.now() - t0;
   trackCostEma = trackCostEma ? trackCostEma * 0.8 + cost * 0.2 : cost;
   if (trackCostEma > TRACK_SLOW_LIMIT) { hideAllTags('負荷軽減のため、ラベルを非表示にしました'); return; }
-  if (trackers.length && trackers.every((t) => !t.active)) hideAllTags('対象を見失ったため、ラベルを非表示にしました');
+  if (trackers.length && trackers.every((t) => t.state === 'lost') && !allLostShown) {
+    allLostShown = true;
+    $('status-chip').textContent = '対象を見失ったためラベルを非表示にしました（再検出中）';
+  }
 }
 
 function hideAllTags(msg) {
@@ -331,6 +395,9 @@ function hideAllTags(msg) {
 function stopTracking(resetCost) {
   if (trackTimer) { clearInterval(trackTimer); trackTimer = null; }
   trackers = [];
+  tickCount = 0;
+  reacquireIdx = 0;
+  allLostShown = false;
   if (resetCost) trackCostEma = 0;
 }
 
@@ -340,7 +407,7 @@ function initTrackers(placed) {
   for (const p of placed) {
     const tpl = makeTemplate(captureGray, p.u, p.v);
     if (!tpl) continue;
-    trackers.push({ ...p, tpl, lost: 0, active: true });
+    trackers.push({ ...p, tpl, lost: 0, state: 'active' });
   }
   if (trackers.length) trackTimer = setInterval(trackTick, TRACK_INTERVAL);
 }
