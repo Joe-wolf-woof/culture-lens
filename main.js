@@ -159,9 +159,9 @@ function placeTags(tags) {
    回転だけでなく移動にも追従する。見失いが続くタグは隠し、全て見失うか
    処理負荷が高い状態が続いたら追従を止めて全ラベルを隠す（発熱・重さ対策）。 */
 const TRACK_W = 192;          // 追跡用の作業解像度（横px）
-const TRACK_INTERVAL = 150;   // 追跡間隔(ms)
+const TRACK_INTERVAL = 100;   // 追跡間隔(ms)
 const TRACK_ACCEPT = 0.55;    // これ未満の相関は「見失い」
-const TRACK_LOST_LIMIT = 8;   // 見失いが続いたらそのタグを隠す（約1.2秒分）
+const TRACK_LOST_LIMIT = 10;  // 見失いが続いたらそのタグを隠す（約1秒分）
 const TRACK_SLOW_LIMIT = 70;  // 1tickの平均処理時間(ms)がこれを超え続けたら全停止
 const trackCanvas = document.createElement('canvas');
 const trackCtx = trackCanvas.getContext('2d', { willReadFrequently: true });
@@ -223,16 +223,25 @@ function nccAt(frame, tpl, x0, y0) {
   return (cross / n - meanI * tpl.mean) / Math.sqrt(varI * tpl.varT);
 }
 
-function searchTemplate(frame, tr) {
+function searchTemplate(frame, tr, othersPx) {
   const tpl = tr.tpl;
   const cx = Math.round(tr.u * frame.w), cy = Math.round(tr.v * frame.h);
   const radius = tr.lost > 0 ? 42 : 24; // 見失い中は探索範囲を広げて復帰を狙う
   const baseX = cx - tpl.offX, baseY = cy - tpl.offY;
+  // 他タグの現在位置に近い候補は割り引く（似た模様への吸着とラベルの入れ替わりを防ぐ）
+  const scoreAt = (x, y) => {
+    let s = nccAt(frame, tpl, x, y);
+    const px = x + tpl.offX, py = y + tpl.offY;
+    for (const o of othersPx) {
+      if (Math.abs(px - o.x) < 12 && Math.abs(py - o.y) < 12) { s *= 0.8; break; }
+    }
+    return s;
+  };
   let best = null;
   for (let y = baseY - radius; y <= baseY + radius; y += 2) {
     for (let x = baseX - radius; x <= baseX + radius; x += 2) {
       if (x < 0 || y < 0 || x + tpl.tw > frame.w || y + tpl.th > frame.h) continue;
-      const s = nccAt(frame, tpl, x, y);
+      const s = scoreAt(x, y);
       if (!best || s > best.score) best = { score: s, x, y };
     }
   }
@@ -241,13 +250,27 @@ function searchTemplate(frame, tr) {
     for (let y = by - 1; y <= by + 1; y++) {
       for (let x = bx - 1; x <= bx + 1; x++) {
         if (x < 0 || y < 0 || x + tpl.tw > frame.w || y + tpl.th > frame.h) continue;
-        const s = nccAt(frame, tpl, x, y);
+        const s = scoreAt(x, y);
         if (s > best.score) best = { score: s, x, y };
       }
     }
   }
   if (!best) return null;
-  return { score: best.score, u: (best.x + tpl.offX) / frame.w, v: (best.y + tpl.offY) / frame.h };
+  return { score: best.score, u: (best.x + tpl.offX) / frame.w, v: (best.y + tpl.offY) / frame.h, x: best.x, y: best.y };
+}
+
+// 一致度が高いときだけ、現在の見た目をテンプレートへ少しずつ反映し、
+// 角度や明るさで見た目が徐々に変わっても追従が外れにくくする
+function updateTemplate(frame, tr, x0, y0) {
+  const tpl = tr.tpl, d = frame.data, w = frame.w;
+  let sum = 0, sum2 = 0;
+  for (const p of tpl.pts) {
+    const cur = d[(y0 + p.dy) * w + (x0 + p.dx)];
+    p.v = p.v * 0.9 + cur * 0.1;
+    sum += p.v; sum2 += p.v * p.v;
+  }
+  tpl.mean = sum / tpl.n;
+  tpl.varT = Math.max(1, sum2 / tpl.n - tpl.mean * tpl.mean);
 }
 
 function applyAnchorPos(tr) {
@@ -275,12 +298,19 @@ function trackTick() {
   const t0 = performance.now();
   for (const tr of trackers) {
     if (!tr.active) continue;
-    const hit = searchTemplate(frame, tr);
+    const othersPx = trackers
+      .filter((t) => t !== tr && t.active)
+      .map((t) => ({ x: t.u * frame.w, y: t.v * frame.h }));
+    const hit = searchTemplate(frame, tr, othersPx);
     if (hit && hit.score >= TRACK_ACCEPT) {
       tr.lost = 0;
-      tr.u += (hit.u - tr.u) * 0.55;
-      tr.v += (hit.v - tr.v) * 0.55;
+      // 適応型平滑化：大きく動いたときは強く追従し、小さなブレだけ抑える（遅れ対策）
+      const jump = Math.hypot((hit.u - tr.u) * frame.w, (hit.v - tr.v) * frame.h);
+      const alpha = Math.min(0.92, 0.45 + jump / 25);
+      tr.u += (hit.u - tr.u) * alpha;
+      tr.v += (hit.v - tr.v) * alpha;
       applyAnchorPos(tr);
+      if (hit.score >= 0.75) updateTemplate(frame, tr, hit.x, hit.y);
     } else {
       tr.lost++;
       if (tr.lost >= TRACK_LOST_LIMIT) { tr.active = false; tr.anchor.visible = false; }
