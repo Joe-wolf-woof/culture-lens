@@ -24,8 +24,6 @@
     <div id="subtitle-extended" class="sub-extended"></div>
   </div>
   <div id="status-chip">カメラ未起動</div>
-  <button id="btn-tip" class="tip-btn">💛 この体験に100円送る<br><small>好奇心ポイント +1</small></button>
-  <div id="tip-total">送られた共感: <span id="tip-yen">¥0</span> / <span id="tip-points">0</span> pt</div>
 </section>
 
 <!-- 入力コントロール -->
@@ -41,7 +39,6 @@
     <label><input type="checkbox" id="chk-speak" checked> 英語の拡張翻訳を読み上げる</label>
     <label><input type="checkbox" id="chk-demo"> デモデータで試す（APIキー不要）</label>
   </div>
-  <div id="latency-line" class="latency">レイテンシ: —</div>
 </section>
 
 <!-- 文化タグ詳細 -->
@@ -54,58 +51,6 @@
     <p id="gap-text"></p>
     <h3>🔥 もっと知りたくなる問い（好奇心フック）</h3>
     <p id="hook-text"></p>
-  </div>
-</section>
-
-<!-- 実験パネル：4つの壁 -->
-<section class="panel">
-  <h2>実験ログ ― 4つの壁の回収データ</h2>
-  <div class="tabs">
-    <button class="tab active" data-tab="metrics">1. 技術・原価</button>
-    <button class="tab" data-tab="compare">2. Big Tech比較</button>
-    <button class="tab" data-tab="devnote">3. 開発ボトルネック</button>
-    <button class="tab" data-tab="wtp">4. 支払い意向</button>
-  </div>
-
-  <div id="tab-metrics" class="tabpage">
-    <div id="metrics-summary" class="muted">計測はまだありません。</div>
-    <table id="metrics-table"><thead><tr><th>時刻</th><th>API応答</th><th>画像KB</th><th>推定原価/回</th><th>電池</th></tr></thead><tbody></tbody></table>
-    <p class="muted">原価は概算：Gemini Flash系の画像入力トークン（約258〜1,032 token/枚）とテキスト入出力を前提に算出。1分体験＝約6回送信として換算表示も行います。</p>
-    <div id="per-minute" class="latency"></div>
-  </div>
-
-  <div id="tab-compare" class="tabpage hidden">
-    <label class="lbl">同じ景色への Gemini Live / Googleレンズの説明（メモ）</label>
-    <textarea id="cmp-bigtech" rows="2" placeholder="大企業AIが返した「正確だが無難な説明」を貼る／要約する"></textarea>
-    <label class="lbl">好奇心スコア（1=退屈 〜 5=もっと知りたい）</label>
-    <div class="row small">
-      <span>Big Tech: <input type="number" id="cmp-score-big" min="1" max="5" value="2"></span>
-      <span>拡張翻訳: <input type="number" id="cmp-score-ours" min="1" max="5" value="4"></span>
-      <button id="btn-save-compare">比較を記録</button>
-    </div>
-  </div>
-
-  <div id="tab-devnote" class="tabpage hidden">
-    <div class="row small">
-      <select id="dev-feel"><option value="flow">時間を忘れた（楽しい）</option><option value="pain">苦痛</option></select>
-      <select id="dev-area"><option>空間UI</option><option>好奇心の設計</option><option>プロンプト制御</option><option>通信・API</option><option>ブラウザ互換性</option><option>3D演出</option><option>その他</option></select>
-    </div>
-    <textarea id="dev-memo" rows="2" placeholder="どこで止まったか／どこが楽しかったかを1行で"></textarea>
-    <button id="btn-save-dev">開発メモを記録</button>
-  </div>
-
-  <div id="tab-wtp" class="tabpage hidden">
-    <p class="muted">見せた相手に直接聞く：「この体験に、いくらまでなら自腹で払う？」</p>
-    <div class="row" id="wtp-buttons">
-      <button data-yen="0">¥0</button><button data-yen="100">¥100</button><button data-yen="300">¥300</button><button data-yen="500">¥500</button><button data-yen="1000">¥1,000</button>
-    </div>
-    <input id="wtp-who" placeholder="誰に聞いたか（例：インバウンド客、友人A）">
-    <div id="wtp-summary" class="muted">回答はまだありません。</div>
-  </div>
-
-  <div class="row">
-    <button id="btn-export">📥 実験ログをJSONで書き出す</button>
-    <button id="btn-clear-log" class="ghost">ログ消去</button>
   </div>
 </section>
 
