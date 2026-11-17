@@ -445,8 +445,21 @@ async function runTranslate() {
   }
 }
 
+/* ---------- カメラ画面の翻訳結果 表示/非表示トグル（右上の👁） ---------- */
+let resultVisible = true;
+let hasResult = false;
+function applyResultVisibility() {
+  $('subtitle-bar').classList.toggle('hidden', !(resultVisible && hasResult));
+  tagGroup.visible = resultVisible;
+}
+$('btn-toggle-result').onclick = () => {
+  resultVisible = !resultVisible;
+  $('btn-toggle-result').classList.toggle('off', !resultVisible);
+  applyResultVisibility();
+};
+
 function renderResult(r) {
-  $('subtitle-bar').classList.remove('hidden');
+  hasResult = true;
   $('subtitle-original').textContent = r.literal_translation || '';
   $('subtitle-extended').textContent = r.extended_translation || '';
   if ($('chk-speak').checked && r.extended_translation) {
@@ -455,6 +468,7 @@ function renderResult(r) {
     speechSynthesis.cancel(); speechSynthesis.speak(u);
   }
   placeTags(r.tags || []);
+  applyResultVisibility();
   const cards = $('tag-cards');
   cards.innerHTML = '';
   $('tags-empty').style.display = r.tags?.length ? 'none' : '';
