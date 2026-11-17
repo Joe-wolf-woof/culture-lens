@@ -13,10 +13,6 @@ let stream = null;
 
 /* ---------- カメラ ---------- */
 async function startCamera() {
-  // 向きセンサーの許可が必要な環境（iOS等）向け。Android Chrome では通常そのまま値が来る
-  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-    DeviceOrientationEvent.requestPermission().catch(() => {});
-  }
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -104,12 +100,14 @@ function makeLabelTexture(title, idx) {
 }
 
 function placeTags(tags) {
+  stopTracking(false);
   gyroGroup.remove(tagGroup);
   tagGroup = new THREE.Group();
   tagGroup.position.z = -5;
   // 画面の横方向の可視範囲（ラベルのはみ出し防止に使う）
   const halfH = 5 * Math.tan(THREE.MathUtils.degToRad(cam3d.fov / 2));
   const halfW = halfH * cam3d.aspect;
+  const placed = [];
   tags.forEach((tag, i) => {
     // AIが返した画像内座標(0〜1)を NDC 経由で空間にピン留めする（固定カメラ近似）
     const ax = (tag.x - 0.5) * 4.6;
@@ -149,48 +147,176 @@ function placeTags(tags) {
     anchor.add(floatGroup);
 
     tagGroup.add(anchor);
+    placed.push({ anchor, label, line, labelX, lineTopY: Math.max(0.09, labelDy - 0.21), u: tag.x, v: tag.y });
   });
   gyroGroup.add(tagGroup);
+  initTrackers(placed);
 }
 
-/* ---------- ジャイロ追従（回転のみ。移動には追従しない） ----------
-   撮影時点の端末の向きを基準に、現在の向きとの差分だけタグ群を逆回転させ、
-   ラベルが空間に張り付いて見えるようにする。センサー値が無い環境では静的表示のまま。 */
-const GYRO_MAX_RAD = 0.6; // 追従する回転の上限（約34度）。これを超えたらラベルは視野外へ自然に任せる
-const Q_IDENTITY = new THREE.Quaternion();
-const Q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -90度 X回転（DeviceOrientationControls と同方式）
-const ZEE = new THREE.Vector3(0, 0, 1);
-let latestDeviceQ = null; // 直近の端末の向き
-let qRef = null;          // 撮影時点の向き（基準）
-let qTarget = new THREE.Quaternion(); // タグ群へ適用する目標回転
+/* ---------- 視覚トラッキング（テンプレートマッチング） ----------
+   撮影フレームから各タグ位置の画像パッチを切り出し、現在の映像の中で
+   正規化相関（NCC）が最大の位置を定期的に探してアンカーを追従させる。
+   回転だけでなく移動にも追従する。見失いが続くタグは隠し、全て見失うか
+   処理負荷が高い状態が続いたら追従を止めて全ラベルを隠す（発熱・重さ対策）。 */
+const TRACK_W = 192;          // 追跡用の作業解像度（横px）
+const TRACK_INTERVAL = 150;   // 追跡間隔(ms)
+const TRACK_ACCEPT = 0.55;    // これ未満の相関は「見失い」
+const TRACK_LOST_LIMIT = 8;   // 見失いが続いたらそのタグを隠す（約1.2秒分）
+const TRACK_SLOW_LIMIT = 70;  // 1tickの平均処理時間(ms)がこれを超え続けたら全停止
+const trackCanvas = document.createElement('canvas');
+const trackCtx = trackCanvas.getContext('2d', { willReadFrequently: true });
+let captureGray = null; // 撮影時点のグレースケールフレーム {data,w,h}
+let trackers = [];
+let trackTimer = null;
+let trackCostEma = 0;
 
-function deviceQuat(alpha, beta, gamma) {
-  const screenAngle = window.screen?.orientation?.angle ?? window.orientation ?? 0;
-  const e = new THREE.Euler(
-    THREE.MathUtils.degToRad(beta),
-    THREE.MathUtils.degToRad(alpha),
-    THREE.MathUtils.degToRad(-gamma),
-    'YXZ'
-  );
-  const q = new THREE.Quaternion().setFromEuler(e);
-  q.multiply(Q1);
-  q.multiply(new THREE.Quaternion().setFromAxisAngle(ZEE, -THREE.MathUtils.degToRad(screenAngle)));
-  return q;
+function grabGray() {
+  if (!video.videoWidth) return null;
+  const w = TRACK_W;
+  const h = Math.max(1, Math.round(TRACK_W * video.videoHeight / video.videoWidth));
+  if (trackCanvas.width !== w || trackCanvas.height !== h) { trackCanvas.width = w; trackCanvas.height = h; }
+  trackCtx.drawImage(video, 0, 0, w, h);
+  const px = trackCtx.getImageData(0, 0, w, h).data;
+  const gray = new Uint8Array(w * h);
+  for (let i = 0, j = 0; i < px.length; i += 4, j++) {
+    gray[j] = (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000;
+  }
+  return { data: gray, w, h };
 }
 
-window.addEventListener('deviceorientation', (ev) => {
-  if (ev.alpha === null || ev.beta === null || ev.gamma === null) return;
-  latestDeviceQ = deviceQuat(ev.alpha, ev.beta, ev.gamma);
-  if (!qRef) return;
-  const target = latestDeviceQ.clone().invert().multiply(qRef);
-  const ang = target.angleTo(Q_IDENTITY);
-  if (ang > GYRO_MAX_RAD) target.copy(Q_IDENTITY.clone().slerp(target, GYRO_MAX_RAD / ang));
-  qTarget.copy(target);
-});
+function makeTemplate(frame, u, v) {
+  const cx = Math.round(u * frame.w), cy = Math.round(v * frame.h);
+  const half = 15;
+  const x0 = Math.max(0, cx - half), y0 = Math.max(0, cy - half);
+  const x1 = Math.min(frame.w, cx + half), y1 = Math.min(frame.h, cy + half);
+  const tw = x1 - x0, th = y1 - y0;
+  if (tw < 12 || th < 12) return null;
+  // テンプレートは2pxおきにサンプルして軽量化（統計はすべてこの点集合で一貫させる）
+  const pts = [];
+  let sum = 0, sum2 = 0;
+  for (let y = y0; y < y1; y += 2) {
+    for (let x = x0; x < x1; x += 2) {
+      const val = frame.data[y * frame.w + x];
+      pts.push({ dx: x - x0, dy: y - y0, v: val });
+      sum += val; sum2 += val * val;
+    }
+  }
+  const n = pts.length;
+  const mean = sum / n;
+  const varT = sum2 / n - mean * mean;
+  if (varT < 4) return null; // ほぼ無地のパッチは追跡できない
+  return { pts, n, mean, varT, tw, th, offX: cx - x0, offY: cy - y0 };
+}
+
+function nccAt(frame, tpl, x0, y0) {
+  let sumI = 0, sumI2 = 0, cross = 0;
+  const d = frame.data, w = frame.w;
+  for (let k = 0; k < tpl.pts.length; k++) {
+    const p = tpl.pts[k];
+    const val = d[(y0 + p.dy) * w + (x0 + p.dx)];
+    sumI += val; sumI2 += val * val; cross += val * p.v;
+  }
+  const n = tpl.n;
+  const meanI = sumI / n;
+  const varI = sumI2 / n - meanI * meanI;
+  if (varI < 1) return -1;
+  return (cross / n - meanI * tpl.mean) / Math.sqrt(varI * tpl.varT);
+}
+
+function searchTemplate(frame, tr) {
+  const tpl = tr.tpl;
+  const cx = Math.round(tr.u * frame.w), cy = Math.round(tr.v * frame.h);
+  const radius = tr.lost > 0 ? 42 : 24; // 見失い中は探索範囲を広げて復帰を狙う
+  const baseX = cx - tpl.offX, baseY = cy - tpl.offY;
+  let best = null;
+  for (let y = baseY - radius; y <= baseY + radius; y += 2) {
+    for (let x = baseX - radius; x <= baseX + radius; x += 2) {
+      if (x < 0 || y < 0 || x + tpl.tw > frame.w || y + tpl.th > frame.h) continue;
+      const s = nccAt(frame, tpl, x, y);
+      if (!best || s > best.score) best = { score: s, x, y };
+    }
+  }
+  if (best) { // 最良点の近傍を1px刻みで微調整
+    const bx = best.x, by = best.y;
+    for (let y = by - 1; y <= by + 1; y++) {
+      for (let x = bx - 1; x <= bx + 1; x++) {
+        if (x < 0 || y < 0 || x + tpl.tw > frame.w || y + tpl.th > frame.h) continue;
+        const s = nccAt(frame, tpl, x, y);
+        if (s > best.score) best = { score: s, x, y };
+      }
+    }
+  }
+  if (!best) return null;
+  return { score: best.score, u: (best.x + tpl.offX) / frame.w, v: (best.y + tpl.offY) / frame.h };
+}
+
+function applyAnchorPos(tr) {
+  const ax = (tr.u - 0.5) * 4.6;
+  const ay = (0.5 - tr.v) * 3.4;
+  tr.anchor.position.set(ax, ay, 0);
+  // ラベルの横はみ出し防止オフセットも追従に合わせて更新する
+  const halfH = 5 * Math.tan(THREE.MathUtils.degToRad(cam3d.fov / 2));
+  const halfW = halfH * cam3d.aspect;
+  const labelX = THREE.MathUtils.clamp(ax, -(halfW - 0.85), halfW - 0.85) - ax;
+  if (Math.abs(labelX - tr.labelX) > 0.02) {
+    tr.labelX = labelX;
+    tr.label.position.x = labelX;
+    tr.line.geometry.setFromPoints([
+      new THREE.Vector3(0, 0.07, 0),
+      new THREE.Vector3(labelX, tr.lineTopY, 0),
+    ]);
+  }
+}
+
+function trackTick() {
+  if (!stream || video.readyState < 2) return;
+  const frame = grabGray();
+  if (!frame) return;
+  const t0 = performance.now();
+  for (const tr of trackers) {
+    if (!tr.active) continue;
+    const hit = searchTemplate(frame, tr);
+    if (hit && hit.score >= TRACK_ACCEPT) {
+      tr.lost = 0;
+      tr.u += (hit.u - tr.u) * 0.55;
+      tr.v += (hit.v - tr.v) * 0.55;
+      applyAnchorPos(tr);
+    } else {
+      tr.lost++;
+      if (tr.lost >= TRACK_LOST_LIMIT) { tr.active = false; tr.anchor.visible = false; }
+    }
+  }
+  const cost = performance.now() - t0;
+  trackCostEma = trackCostEma ? trackCostEma * 0.8 + cost * 0.2 : cost;
+  if (trackCostEma > TRACK_SLOW_LIMIT) { hideAllTags('負荷軽減のため、ラベルを非表示にしました'); return; }
+  if (trackers.length && trackers.every((t) => !t.active)) hideAllTags('対象を見失ったため、ラベルを非表示にしました');
+}
+
+function hideAllTags(msg) {
+  stopTracking(false);
+  tagGroup.children.forEach((a) => { a.visible = false; });
+  $('status-chip').textContent = msg;
+}
+
+function stopTracking(resetCost) {
+  if (trackTimer) { clearInterval(trackTimer); trackTimer = null; }
+  trackers = [];
+  if (resetCost) trackCostEma = 0;
+}
+
+function initTrackers(placed) {
+  stopTracking(true);
+  if (!captureGray || !stream) return;
+  for (const p of placed) {
+    const tpl = makeTemplate(captureGray, p.u, p.v);
+    if (!tpl) continue;
+    trackers.push({ ...p, tpl, lost: 0, active: true });
+  }
+  if (trackers.length) trackTimer = setInterval(trackTick, TRACK_INTERVAL);
+}
 
 function animate(t) {
   requestAnimationFrame(animate);
-  gyroGroup.quaternion.slerp(qTarget, 0.2); // センサーの微振動を平滑化
   tagGroup.children.forEach((a) => {
     const f = a.userData.floatGroup;
     if (f) f.position.y = Math.sin(t / 900 + f.userData.phase) * 0.04;
@@ -208,10 +334,8 @@ async function runTranslate() {
   $('status-chip').textContent = '拡張翻訳中…';
   let frame = { mimeType: 'image/jpeg', data: '', bytes: 0 };
   if (stream && !useDemo) frame = captureFrame();
-  // 撮影時点の向きをジャイロ追従の基準にする（センサー値が無ければ静的表示のまま）
-  qRef = latestDeviceQ ? latestDeviceQ.clone() : null;
-  qTarget.identity();
-  gyroGroup.quaternion.identity();
+  // 追跡用に、撮影時点の映像を作業解像度グレースケールで控える
+  captureGray = stream && !useDemo ? grabGray() : null;
 
   try {
     const result = useDemo ? { ...MOCK_RESULT, source: 'demo' } : await extendedTranslate(frame, transcript);
