@@ -1,5 +1,5 @@
 /**
- * main.js ― 拡張翻訳・空間ウィンドウ（MVP）
+ * main.js ― 拡張翻訳 - CultureLens（MVP）
  * 入力: カメラ映像 + マイク音声（Web Speech API / 手入力フォールバック）
  * 処理: engine/translate-engine.js（Gemini マルチモーダル拡張翻訳）
  * 出力: 字幕 + Three.js 空間タグピン
