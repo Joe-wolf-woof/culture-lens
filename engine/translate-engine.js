@@ -11,6 +11,10 @@
  * - 自己関連効果: 受け手（英語圏の生活者）の日常と接続する一文を必ず入れる。
  * - 具体性効果: 抽象的な文化説明ではなく、感覚（匂い・手触り・音・温度）で語る。
  * - 物語輸送: 語り手の感情と小さなエピソードを字幕に残す（無難な説明との差分）。
+ *   ただしエピソードは入力に実在する場合のみ。2026-11-17の実機実験で、言葉なし
+ *   実行時に "grandmother's house" という来歴の捏造が混入したため、プロンプトに
+ *   【事実の扱い】として接地ルールを明文化した（一般的な文化知識の補足は可、
+ *   語り手個人の事情の創作は禁止）。
  *
  * Gemini キーが無ければモック（チャイのデモデータ）を返す。
  * モデルフォールバックは HowLink と同じ方式（3.x系から試行、404/429/503で次へ）。
@@ -34,12 +38,18 @@ const EXTENDED_TRANSLATION_PROMPT = `
 受け手は英語圏の一般生活者です。Google翻訳やGoogleレンズのような「正確だが無難で退屈な説明」は禁止です。
 
 やること:
-1. literal_translation: 語り手の言葉の忠実な英訳。
-2. extended_translation: 感情と文脈が伝わる英語の字幕（2文以内）。語り手の声の温度を残すこと。
+1. literal_translation: 語り手の言葉の忠実な英訳。言葉がない場合は空文字にする。
+2. extended_translation: 感情と文脈が伝わる英語の字幕（2文以内）。語り手の声の温度を残すこと。ただし下記の【事実の扱い】を厳守すること。
 3. tags: 画像の中のモノ・風景について2〜4個。各タグには、その文化でそれが大切な理由（why_it_matters）と、受け手の日常と接続する一文を含める。x,y は画像内の位置（0〜1）。
 4. cultural_gap: 受け手が最も驚く異文化のギャップを「1つだけ」選んで書く（情報ギャップ理論：落差は1つに絞るほど好奇心が強くなる）。
 5. curiosity_hook: 読んだ人が次に質問したくなる「問い」を1文で。
-6. speaker_emotion: 語り手の感情を英語1語＋短い根拠。
+6. speaker_emotion: 語り手の感情を英語1語＋短い根拠。言葉がない場合は推定せず、空文字にする。
+
+【事実の扱い（最重要）】
+- 事実として書いてよいのは、(a) 語り手の言葉に実際に含まれていること、(b) 画像に実際に写っていること、の2種類だけ。加えて、対象物そのものに関する文化・歴史の一般知識は補ってよい。
+- 語り手の個人的な来歴（誰の家か、誰にもらったか、いつ・どこで手に入れたか、家族との思い出など）は、言葉に明示されていない限り絶対に創作しない。"my grandmother's house" のような一人称のエピソードも作らない。
+- 言葉がない場合は、語り手の感情・事情・来歴を推定しない。extended_translation は画像の事実と文化的文脈だけで構成する。
+- 受け手の日常との接続は「〜に相当する」「〜のようなものだ」という比喩・例えの形でのみ行い、語り手側の事実として書かない。
 
 必ず次のJSON形式だけで答えてください:
 {"literal_translation":"","extended_translation":"","speaker_emotion":"","scene_summary":"","tags":[{"title":"","x":0.5,"y":0.5,"description":"","why_it_matters":""}],"cultural_gap":"","curiosity_hook":""}
@@ -96,7 +106,7 @@ export async function extendedTranslate(frame, transcript) {
   const key = getApiKey();
   if (!key) return { ...MOCK_RESULT };
   const parts = [
-    { text: `${EXTENDED_TRANSLATION_PROMPT}\n\n語り手の言葉（日本語）: ${transcript || '（言葉なし。画像の文脈から推定する）'}` },
+    { text: `${EXTENDED_TRANSLATION_PROMPT}\n\n語り手の言葉（日本語）: ${transcript || '（言葉なし）'}` },
     { inline_data: { mime_type: frame.mimeType, data: frame.data } },
   ];
   let lastError = null;
