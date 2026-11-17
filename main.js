@@ -13,6 +13,10 @@ let stream = null;
 
 /* ---------- カメラ ---------- */
 async function startCamera() {
+  // 向きセンサーの許可が必要な環境（iOS等）向け。Android Chrome では通常そのまま値が来る
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().catch(() => {});
+  }
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -65,8 +69,13 @@ const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true 
 const scene = new THREE.Scene();
 const cam3d = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
 cam3d.position.z = 5;
+// ジャイロ追従用：カメラ位置（0,0,5）を支点にタグ全体を回すためのグループ
+const gyroGroup = new THREE.Group();
+gyroGroup.position.set(0, 0, 5);
+scene.add(gyroGroup);
 let tagGroup = new THREE.Group();
-scene.add(tagGroup);
+tagGroup.position.z = -5;
+gyroGroup.add(tagGroup);
 
 function resizeGL() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -95,8 +104,12 @@ function makeLabelTexture(title, idx) {
 }
 
 function placeTags(tags) {
-  scene.remove(tagGroup);
+  gyroGroup.remove(tagGroup);
   tagGroup = new THREE.Group();
+  tagGroup.position.z = -5;
+  // 画面の横方向の可視範囲（ラベルのはみ出し防止に使う）
+  const halfH = 5 * Math.tan(THREE.MathUtils.degToRad(cam3d.fov / 2));
+  const halfW = halfH * cam3d.aspect;
   tags.forEach((tag, i) => {
     // AIが返した画像内座標(0〜1)を NDC 経由で空間にピン留めする（固定カメラ近似）
     const ax = (tag.x - 0.5) * 4.6;
@@ -116,16 +129,18 @@ function placeTags(tags) {
     anchor.add(halo, dot);
 
     // ラベルはコンパクトにし、実物の上部に浮かせてリーダーラインで結ぶ
+    // 横方向はラベル全体が画面内に収まるようずらし、ラインを斜めにしてアンカーと結ぶ
     const labelDy = Math.max(0.3, Math.min(0.52, 1.95 - ay));
+    const labelX = THREE.MathUtils.clamp(ax, -(halfW - 0.85), halfW - 0.85) - ax;
     const floatGroup = new THREE.Group();
     const label = new THREE.Mesh(
       new THREE.PlaneGeometry(1.55, 0.39),
       new THREE.MeshBasicMaterial({ map: makeLabelTexture(tag.title, i), transparent: true })
     );
-    label.position.set(0, labelDy, 0);
+    label.position.set(labelX, labelDy, 0);
     const lineGeo = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0.07, 0),
-      new THREE.Vector3(0, Math.max(0.09, labelDy - 0.21), 0),
+      new THREE.Vector3(labelX, Math.max(0.09, labelDy - 0.21), 0),
     ]);
     const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xd29922, transparent: true, opacity: 0.8 }));
     floatGroup.add(line, label);
@@ -135,11 +150,47 @@ function placeTags(tags) {
 
     tagGroup.add(anchor);
   });
-  scene.add(tagGroup);
+  gyroGroup.add(tagGroup);
 }
+
+/* ---------- ジャイロ追従（回転のみ。移動には追従しない） ----------
+   撮影時点の端末の向きを基準に、現在の向きとの差分だけタグ群を逆回転させ、
+   ラベルが空間に張り付いて見えるようにする。センサー値が無い環境では静的表示のまま。 */
+const GYRO_MAX_RAD = 0.6; // 追従する回転の上限（約34度）。これを超えたらラベルは視野外へ自然に任せる
+const Q_IDENTITY = new THREE.Quaternion();
+const Q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -90度 X回転（DeviceOrientationControls と同方式）
+const ZEE = new THREE.Vector3(0, 0, 1);
+let latestDeviceQ = null; // 直近の端末の向き
+let qRef = null;          // 撮影時点の向き（基準）
+let qTarget = new THREE.Quaternion(); // タグ群へ適用する目標回転
+
+function deviceQuat(alpha, beta, gamma) {
+  const screenAngle = window.screen?.orientation?.angle ?? window.orientation ?? 0;
+  const e = new THREE.Euler(
+    THREE.MathUtils.degToRad(beta),
+    THREE.MathUtils.degToRad(alpha),
+    THREE.MathUtils.degToRad(-gamma),
+    'YXZ'
+  );
+  const q = new THREE.Quaternion().setFromEuler(e);
+  q.multiply(Q1);
+  q.multiply(new THREE.Quaternion().setFromAxisAngle(ZEE, -THREE.MathUtils.degToRad(screenAngle)));
+  return q;
+}
+
+window.addEventListener('deviceorientation', (ev) => {
+  if (ev.alpha === null || ev.beta === null || ev.gamma === null) return;
+  latestDeviceQ = deviceQuat(ev.alpha, ev.beta, ev.gamma);
+  if (!qRef) return;
+  const target = latestDeviceQ.clone().invert().multiply(qRef);
+  const ang = target.angleTo(Q_IDENTITY);
+  if (ang > GYRO_MAX_RAD) target.copy(Q_IDENTITY.clone().slerp(target, GYRO_MAX_RAD / ang));
+  qTarget.copy(target);
+});
 
 function animate(t) {
   requestAnimationFrame(animate);
+  gyroGroup.quaternion.slerp(qTarget, 0.2); // センサーの微振動を平滑化
   tagGroup.children.forEach((a) => {
     const f = a.userData.floatGroup;
     if (f) f.position.y = Math.sin(t / 900 + f.userData.phase) * 0.04;
@@ -157,6 +208,10 @@ async function runTranslate() {
   $('status-chip').textContent = '拡張翻訳中…';
   let frame = { mimeType: 'image/jpeg', data: '', bytes: 0 };
   if (stream && !useDemo) frame = captureFrame();
+  // 撮影時点の向きをジャイロ追従の基準にする（センサー値が無ければ静的表示のまま）
+  qRef = latestDeviceQ ? latestDeviceQ.clone() : null;
+  qTarget.identity();
+  gyroGroup.quaternion.identity();
 
   try {
     const result = useDemo ? { ...MOCK_RESULT, source: 'demo' } : await extendedTranslate(frame, transcript);
