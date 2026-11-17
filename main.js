@@ -98,20 +98,52 @@ function placeTags(tags) {
   scene.remove(tagGroup);
   tagGroup = new THREE.Group();
   tags.forEach((tag, i) => {
-    const mat = new THREE.MeshBasicMaterial({ map: makeLabelTexture(tag.title, i), transparent: true });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 0.6), mat);
     // AIが返した画像内座標(0〜1)を NDC 経由で空間にピン留めする（固定カメラ近似）
-    mesh.position.set((tag.x - 0.5) * 4.6, (0.5 - tag.y) * 3.4, 0);
-    mesh.userData.baseY = mesh.position.y;
-    mesh.userData.phase = i * 1.3;
-    tagGroup.add(mesh);
+    const ax = (tag.x - 0.5) * 4.6;
+    const ay = (0.5 - tag.y) * 3.4;
+    const anchor = new THREE.Group();
+    anchor.position.set(ax, ay, 0);
+
+    // 実物の位置を示す小さなアンカードット（実物を覆わない）
+    const halo = new THREE.Mesh(
+      new THREE.CircleGeometry(0.085, 24),
+      new THREE.MeshBasicMaterial({ color: 0xd29922, transparent: true, opacity: 0.35 })
+    );
+    const dot = new THREE.Mesh(
+      new THREE.CircleGeometry(0.045, 24),
+      new THREE.MeshBasicMaterial({ color: 0xd29922, transparent: true, opacity: 0.95 })
+    );
+    anchor.add(halo, dot);
+
+    // ラベルはコンパクトにし、実物の上部に浮かせてリーダーラインで結ぶ
+    const labelDy = Math.max(0.3, Math.min(0.52, 1.95 - ay));
+    const floatGroup = new THREE.Group();
+    const label = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.55, 0.39),
+      new THREE.MeshBasicMaterial({ map: makeLabelTexture(tag.title, i), transparent: true })
+    );
+    label.position.set(0, labelDy, 0);
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0.07, 0),
+      new THREE.Vector3(0, Math.max(0.09, labelDy - 0.21), 0),
+    ]);
+    const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xd29922, transparent: true, opacity: 0.8 }));
+    floatGroup.add(line, label);
+    floatGroup.userData.phase = i * 1.3;
+    anchor.userData.floatGroup = floatGroup;
+    anchor.add(floatGroup);
+
+    tagGroup.add(anchor);
   });
   scene.add(tagGroup);
 }
 
 function animate(t) {
   requestAnimationFrame(animate);
-  tagGroup.children.forEach((m) => { m.position.y = m.userData.baseY + Math.sin(t / 900 + m.userData.phase) * 0.05; });
+  tagGroup.children.forEach((a) => {
+    const f = a.userData.floatGroup;
+    if (f) f.position.y = Math.sin(t / 900 + f.userData.phase) * 0.04;
+  });
   renderer.render(scene, cam3d);
 }
 requestAnimationFrame(animate);
