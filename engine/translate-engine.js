@@ -44,6 +44,7 @@ const EXTENDED_TRANSLATION_PROMPT = `
 4. cultural_gap: 受け手が最も驚く異文化のギャップを「1つだけ」選んで書く（情報ギャップ理論：落差は1つに絞るほど好奇心が強くなる）。
 5. curiosity_hook: 読んだ人が次に質問したくなる「問い」を1文で。
 6. speaker_emotion: 語り手の感情を英語1語＋短い根拠。言葉がない場合は推定せず、空文字にする。
+7. 日本語版: 英語フィールドそれぞれに対応する自然な日本語版も返す。literal_translation_ja は literal_translation に対応する日本語（語り手の言葉を整えた文でよい）。extended_translation_ja は extended_translation の感情と文脈を保った日本語（字幕調、2文以内）。tags の各要素には title_ja / description_ja / why_it_matters_ja を付ける。cultural_gap_ja / curiosity_hook_ja も同様に付ける。日本語版にも【事実の扱い】を厳守すること（英語版にない来歴や事情を日本語版で足さない）。
 
 【事実の扱い（最重要）】
 - 事実として書いてよいのは、(a) 語り手の言葉に実際に含まれていること、(b) 画像に実際に写っていること、の2種類だけ。加えて、対象物そのものに関する文化・歴史の一般知識は補ってよい。
@@ -52,20 +53,24 @@ const EXTENDED_TRANSLATION_PROMPT = `
 - 受け手の日常との接続は「〜に相当する」「〜のようなものだ」という比喩・例えの形でのみ行い、語り手側の事実として書かない。
 
 必ず次のJSON形式だけで答えてください:
-{"literal_translation":"","extended_translation":"","speaker_emotion":"","scene_summary":"","tags":[{"title":"","x":0.5,"y":0.5,"description":"","why_it_matters":""}],"cultural_gap":"","curiosity_hook":""}
+{"literal_translation":"","extended_translation":"","literal_translation_ja":"","extended_translation_ja":"","speaker_emotion":"","scene_summary":"","tags":[{"title":"","title_ja":"","x":0.5,"y":0.5,"description":"","description_ja":"","why_it_matters":"","why_it_matters_ja":""}],"cultural_gap":"","cultural_gap_ja":"","curiosity_hook":"","curiosity_hook_ja":""}
 `.trim();
 
 export const MOCK_RESULT = {
   literal_translation: "This is masala chai made from whole spices. On cold days, holding the cup with both hands is our family's winter ritual.",
   extended_translation: "He doesn't buy tea bags. He crushes whole spices by hand — because in his home, warmth is something you make, not something you buy.",
+  literal_translation_ja: "これはホールスパイスから作るマサラチャイです。寒い日は、両手でカップを持つのが我が家の冬の習慣です。",
+  extended_translation_ja: "彼はティーバッグを買わない。ホールスパイスを手で砕く。彼の家では、温かさは買うものではなく、作るものだからだ。",
   speaker_emotion: "proud — he slows down when describing the two-handed grip on the cup",
   scene_summary: "A small home kitchen; a pot of masala chai simmering, whole spices beside it.",
   tags: [
-    { title: "Masala chai from whole spices", x: 0.45, y: 0.55, description: "Cardamom, cloves and ginger, crushed just before brewing — never pre-mixed powder.", why_it_matters: "Grinding spices by hand is a small daily act of care; the aroma is the signal that 'someone is home'." },
-    { title: "The two-handed cup", x: 0.6, y: 0.7, description: "Holding a hot cup with both palms is a winter habit across Japan, for tea and soup alike.", why_it_matters: "Warmth through the palms is treated as comfort itself — the drink is almost an excuse." },
+    { title: "Masala chai from whole spices", title_ja: "ホールスパイスのマサラチャイ", x: 0.45, y: 0.55, description: "Cardamom, cloves and ginger, crushed just before brewing — never pre-mixed powder.", description_ja: "カルダモン、クローブ、生姜を、淹れる直前に砕く。混ぜ合わせ済みの粉は使わない。", why_it_matters: "Grinding spices by hand is a small daily act of care; the aroma is the signal that 'someone is home'.", why_it_matters_ja: "スパイスを手で砕くのは、日々の小さな手入れ。その香りが『誰かが家にいる』合図になる。" },
+    { title: "The two-handed cup", title_ja: "両手で持つカップ", x: 0.6, y: 0.7, description: "Holding a hot cup with both palms is a winter habit across Japan, for tea and soup alike.", description_ja: "熱いカップを両手のひらで包むのは、日本中で見られる冬の習慣。お茶でも汁物でも同じだ。", why_it_matters: "Warmth through the palms is treated as comfort itself — the drink is almost an excuse.", why_it_matters_ja: "手のひらの温かさ自体が心地よさとして扱われる。飲み物は、ほとんど口実にすぎない。" },
   ],
   cultural_gap: "In Japan, a drink can be a hand-warmer first and a beverage second — convenience stores even sell hot canned drinks purely to hold on cold train platforms.",
   curiosity_hook: "What everyday object in your home would carry this much memory for you?",
+  cultural_gap_ja: "日本では、飲み物はまず『手を温めるもの』で、次に飲み物であることがある。コンビニでは、寒い駅のホームで持つためだけに、温かい缶飲料が売られている。",
+  curiosity_hook_ja: "あなたの家で、これほど記憶を背負った日用品は何ですか？",
   source: 'mock',
 };
 
@@ -78,7 +83,7 @@ function orderedModels() {
 async function callModel(model, key, parts) {
   const body = {
     contents: [{ role: 'user', parts }],
-    generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 2000, thinkingConfig: { thinkingBudget: 0 } },
+    generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 3200, thinkingConfig: { thinkingBudget: 0 } },
   };
   const res = await fetch(`${API_BASE}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),

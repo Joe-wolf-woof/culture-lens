@@ -5,7 +5,7 @@
  * 出力: 字幕 + Three.js 空間タグピン
  */
 import * as THREE from 'three';
-import { extendedTranslate, getApiKey, setApiKey, MOCK_RESULT } from './engine/translate-engine.js';
+import { extendedTranslate, getApiKey, setApiKey, MOCK_RESULT } from './engine/translate-engine.js?v=20261118-1';
 
 const $ = (id) => document.getElementById(id);
 const video = $('camera');
@@ -22,9 +22,34 @@ async function startCamera() {
     $('status-chip').textContent = 'カメラ起動中（背面）';
     $('btn-record').disabled = false;
     $('btn-translate').disabled = false;
+    applyResultVisibility();
   } catch (e) {
     $('status-chip').textContent = 'カメラを起動できませんでした: ' + e.message;
   }
+  updateCameraButton();
+}
+
+/* ---------- カメラ ON/OFF トグル ----------
+   OFFにしても翻訳結果（字幕・タグカード・ギャップ／フック・見比べ）は
+   そのまま読める。止めるのは映像と空間タグとトラッキングだけ。 */
+function stopCamera() {
+  if (recognition) { recognition.stop(); }
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  video.srcObject = null;
+  stopTracking(true);
+  tagGroup.visible = false;
+  $('btn-record').disabled = true;
+  $('btn-translate').disabled = true;
+  $('status-chip').textContent = 'カメラ停止中';
+  updateCameraButton();
+}
+function toggleCamera() {
+  if (stream) stopCamera();
+  else startCamera();
+}
+function updateCameraButton() {
+  $('btn-camera').textContent = stream ? '📷 ON' : '📷 OFF';
+  $('btn-camera').classList.toggle('off', !stream);
 }
 
 function captureFrame() {
@@ -72,6 +97,7 @@ scene.add(gyroGroup);
 let tagGroup = new THREE.Group();
 tagGroup.position.z = -5;
 gyroGroup.add(tagGroup);
+let placedTags = []; // 配置済みタグ（言語切替時にラベルを描き直すために保持）
 
 function resizeGL() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -133,7 +159,7 @@ function placeTags(tags) {
     const floatGroup = new THREE.Group();
     const label = new THREE.Mesh(
       new THREE.PlaneGeometry(1.55, 0.39),
-      new THREE.MeshBasicMaterial({ map: makeLabelTexture(tag.title, i), transparent: true })
+      new THREE.MeshBasicMaterial({ map: makeLabelTexture(tagTitle(tag), i), transparent: true })
     );
     label.position.set(labelX, labelDy, 0);
     const lineGeo = new THREE.BufferGeometry().setFromPoints([
@@ -147,9 +173,10 @@ function placeTags(tags) {
     anchor.add(floatGroup);
 
     tagGroup.add(anchor);
-    placed.push({ anchor, label, line, labelX, lineTopY: Math.max(0.09, labelDy - 0.21), u: tag.x, v: tag.y });
+    placed.push({ anchor, label, line, labelX, lineTopY: Math.max(0.09, labelDy - 0.21), u: tag.x, v: tag.y, tag, idx: i });
   });
   gyroGroup.add(tagGroup);
+  placedTags = placed;
   initTrackers(placed);
 }
 
@@ -458,38 +485,104 @@ $('btn-toggle-result').onclick = () => {
   applyResultVisibility();
 };
 
-function renderResult(r) {
-  hasResult = true;
-  $('subtitle-original').textContent = r.literal_translation || '';
-  $('subtitle-extended').textContent = r.extended_translation || '';
-  if ($('chk-speak').checked && r.extended_translation) {
-    const u = new SpeechSynthesisUtterance(r.extended_translation);
-    u.lang = 'en-US'; u.rate = 0.98;
-    speechSynthesis.cancel(); speechSynthesis.speak(u);
+/* ---------- 表示言語（案A：トグルチップで一括切替） ----------
+   結果は英語・日本語の両方を保持し、表示だけを切り替える。
+   言語状態はアプリ全体で1つ（localStorage に保存）。 */
+let resultLang = localStorage.getItem('etw_result_lang') || 'en';
+let lastResult = null;
+const pick = (en, ja) => (resultLang === 'ja' ? (ja || en || '') : (en || ''));
+const tagTitle = (tag) => pick(tag.title, tag.title_ja);
+const tagDesc = (tag) => pick(tag.description, tag.description_ja);
+const tagWhy = (tag) => pick(tag.why_it_matters, tag.why_it_matters_ja);
+
+function updateLangChip() {
+  $('btn-lang').innerHTML = resultLang === 'en' ? '<b>EN</b> / あ' : 'EN / <b>あ</b>';
+}
+$('btn-lang').onclick = () => {
+  resultLang = resultLang === 'en' ? 'ja' : 'en';
+  localStorage.setItem('etw_result_lang', resultLang);
+  updateLangChip();
+  if (lastResult) { renderTexts(); refreshTagLabels(); }
+};
+updateLangChip();
+
+// 空間タグのラベルだけを現在の言語で描き直す（配置とトラッキングは維持する）
+function refreshTagLabels() {
+  for (const p of placedTags) {
+    const tex = makeLabelTexture(tagTitle(p.tag), p.idx);
+    if (p.label.material.map) p.label.material.map.dispose();
+    p.label.material.map = tex;
+    p.label.material.needsUpdate = true;
   }
-  placeTags(r.tags || []);
-  applyResultVisibility();
+}
+
+// 字幕・タグカード・ギャップ欄を、現在の言語で描き直す
+function renderTexts() {
+  const r = lastResult;
+  if (!r) return;
+  $('subtitle-original').textContent = pick(r.literal_translation, r.literal_translation_ja);
+  $('subtitle-extended').textContent = pick(r.extended_translation, r.extended_translation_ja);
   const cards = $('tag-cards');
   cards.innerHTML = '';
   $('tags-empty').style.display = r.tags?.length ? 'none' : '';
   (r.tags || []).forEach((tag, i) => {
     const div = document.createElement('div');
     div.className = 'tag-card';
-    div.innerHTML = `<h4>${i + 1}. ${escapeHtml(tag.title)}</h4><p>${escapeHtml(tag.description)}</p><p class="why">なぜ大切か: ${escapeHtml(tag.why_it_matters || '')}</p>`;
+    div.innerHTML = `<h4>${i + 1}. ${escapeHtml(tagTitle(tag))}</h4><p>${escapeHtml(tagDesc(tag))}</p><p class="why">なぜ大切か: ${escapeHtml(tagWhy(tag) || '')}</p>`;
     cards.appendChild(div);
   });
   if (r.cultural_gap || r.curiosity_hook) {
     $('gap-box').classList.remove('hidden');
-    $('gap-text').textContent = r.cultural_gap || '';
-    $('hook-text').textContent = r.curiosity_hook || '';
+    $('gap-text').textContent = pick(r.cultural_gap, r.cultural_gap_ja);
+    $('hook-text').textContent = pick(r.curiosity_hook, r.curiosity_hook_ja);
   }
 }
+
+function renderResult(r) {
+  hasResult = true;
+  lastResult = r;
+  renderTexts();
+  const speakText = pick(r.extended_translation, r.extended_translation_ja);
+  if ($('chk-speak').checked && speakText) {
+    const u = new SpeechSynthesisUtterance(speakText);
+    u.lang = resultLang === 'ja' ? 'ja-JP' : 'en-US'; u.rate = 0.98;
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  }
+  placeTags(r.tags || []);
+  applyResultVisibility();
+  $('btn-compare').disabled = false;
+}
+
+/* ---------- 見比べシート（案D：EN・日本語の対照表示） ---------- */
+function compareRow(label, en, ja) {
+  if (!en && !ja) return '';
+  return `<div class="cmp-row"><h4>${escapeHtml(label)}</h4><p class="cmp-en"><span class="cmp-tag">EN</span>${escapeHtml(en || '')}</p><p class="cmp-ja"><span class="cmp-tag">日本語</span>${escapeHtml(ja || '')}</p></div>`;
+}
+function openCompare() {
+  const r = lastResult;
+  if (!r) return;
+  let html = '';
+  html += compareRow('直訳', r.literal_translation, r.literal_translation_ja);
+  html += compareRow('拡張翻訳', r.extended_translation, r.extended_translation_ja);
+  (r.tags || []).forEach((tag, i) => {
+    html += compareRow(`タグ ${i + 1}`,
+      [tag.title, tag.description, tag.why_it_matters].filter(Boolean).join('\n'),
+      [tag.title_ja, tag.description_ja, tag.why_it_matters_ja].filter(Boolean).join('\n'));
+  });
+  html += compareRow('🧳 異なる文化とのギャップ', r.cultural_gap, r.cultural_gap_ja);
+  html += compareRow('🗺️ もっと知りたくなる好奇心フック', r.curiosity_hook, r.curiosity_hook_ja);
+  $('compare-body').innerHTML = html || '<p class="muted">まだ結果がありません。</p>';
+  $('compare').classList.remove('hidden');
+}
+$('btn-compare').addEventListener('click', openCompare);
+$('btn-close-compare').addEventListener('click', () => $('compare').classList.add('hidden'));
 function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
 
 /* ---------- 設定・初期化 ---------- */
 $('btn-settings').addEventListener('click', () => { $('api-key').value = getApiKey(); $('settings').classList.remove('hidden'); });
 $('btn-close-settings').addEventListener('click', () => $('settings').classList.add('hidden'));
 $('btn-save-key').addEventListener('click', () => { setApiKey($('api-key').value.trim()); $('settings').classList.add('hidden'); });
-$('btn-camera').addEventListener('click', startCamera);
+$('btn-camera').addEventListener('click', toggleCamera);
+updateCameraButton();
 $('btn-record').addEventListener('click', toggleRecord);
 $('btn-translate').addEventListener('click', runTranslate);
