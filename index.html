@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>拡張翻訳 - CultureLens（MVP）</title>
-<link rel="stylesheet" href="css/style.css?v=20261118-3">
+<link rel="stylesheet" href="css/style.css?v=20261122-1">
 <script type="importmap">
 { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
 </script>
@@ -18,10 +18,15 @@
 <!-- カメラ + Three.js 空間レイヤー -->
 <section id="stage">
   <video id="camera" autoplay playsinline muted></video>
+  <img id="photo" class="hidden" alt="選択中の写真">
   <canvas id="gl"></canvas>
   <div id="subtitle-bar" class="hidden">
     <div id="subtitle-original" class="sub-original"></div>
     <div id="subtitle-extended" class="sub-extended"></div>
+  </div>
+  <div id="photo-bar" class="hidden">
+    <button id="btn-photo-translate" class="accent">🌐 この写真で拡張翻訳</button>
+    <button id="btn-photo-retake">↩ 撮り直す／選び直す</button>
   </div>
   <div id="status-chip">カメラ未起動</div>
   <button id="btn-toggle-result" title="翻訳結果の表示/非表示">💬 翻訳を表示/非表示にする</button>
@@ -34,6 +39,15 @@
     <button id="btn-camera" class="primary off">📷 ON</button>
     <button id="btn-translate" class="accent" disabled>🌐拡張翻訳(EN/あ)</button>
     <button id="btn-record" class="primary" disabled>🎙 語る（音声入力）</button>
+  </div>
+  <div class="row actions">
+    <button id="btn-shutter" class="primary" disabled>📸 写真を撮る</button>
+    <button id="btn-pick" class="primary">🖼 写真を選ぶ</button>
+  </div>
+  <input type="file" id="file-photo" accept="image/*" class="hidden">
+  <div id="photo-history" class="hidden">
+    <span class="lbl">撮った写真（このセッションのみ）</span>
+    <div id="photo-thumbs"></div>
   </div>
   <label class="lbl">📷カメラに見せる/🎙話しかける/📝手入力する</label>
   <textarea id="transcript" rows="3" placeholder="例：これは熊の木彫りです。北海道の有名な工芸品です。"></textarea>
@@ -84,6 +98,6 @@
   </div>
 </div>
 
-<script type="module" src="./main.js?v=20261118-3"></script>
+<script type="module" src="./main.js?v=20261122-1"></script>
 </body>
 </html>
