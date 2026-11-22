@@ -706,3 +706,17 @@ $('file-photo').addEventListener('change', (e) => {
 });
 $('btn-photo-translate').addEventListener('click', runTranslate);
 $('btn-photo-retake').addEventListener('click', exitPhoto);
+$('btn-photo-save').addEventListener('click', () => {
+  if (!currentPhoto) return;
+  // 表示中の写真（カメラ映像のフレームのみ）を端末へ保存する。CultureLens は
+  // 通常セッション内メモリにしか写真を持たないため、保存はこの明示操作のときだけ。
+  const a = document.createElement('a');
+  const t = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  a.href = currentPhoto.dataUrl;
+  a.download = `culturelens-${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}-${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}.jpg`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  $('status-chip').textContent = '写真を端末に保存しました';
+});
