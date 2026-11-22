@@ -5,7 +5,7 @@
  * 出力: 字幕 + Three.js 空間タグピン
  */
 import * as THREE from 'three';
-import { extendedTranslate, getApiKey, setApiKey, MOCK_RESULT } from './engine/translate-engine.js?v=20261118-1';
+import { extendedTranslate, getApiKey, setApiKey, MOCK_RESULT } from './engine/translate-engine.js?v=20261122-1';
 
 const $ = (id) => document.getElementById(id);
 const video = $('camera');
@@ -22,6 +22,7 @@ async function startCamera() {
     $('status-chip').textContent = 'カメラ起動中（背面）';
     $('btn-record').disabled = false;
     $('btn-translate').disabled = false;
+    $('btn-shutter').disabled = false;
     applyResultVisibility();
   } catch (e) {
     $('status-chip').textContent = 'カメラを起動できませんでした: ' + e.message;
@@ -40,6 +41,7 @@ function stopCamera() {
   tagGroup.visible = false;
   $('btn-record').disabled = true;
   $('btn-translate').disabled = true;
+  $('btn-shutter').disabled = true;
   $('status-chip').textContent = 'カメラ停止中';
   updateCameraButton();
 }
@@ -61,6 +63,99 @@ function captureFrame() {
   c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
   const dataUrl = c.toDataURL('image/jpeg', 0.72);
   return { mimeType: 'image/jpeg', data: dataUrl.split(',')[1], bytes: Math.floor(dataUrl.length * 0.75) };
+}
+
+/* ---------- 写真モード（静止画の拡張翻訳） ----------
+   カメラを向け続けるのが難しい場面向けに、撮った写真／端末内の写真を
+   静止画のまま拡張翻訳する。翻訳パイプラインと結果表示はライブと共通で、
+   ラベルは静止画に対して1回だけ配置する（NCC追跡はライブ専用のまま）。
+   履歴はセッション内のみ（localStorage には画像を保存しない）。 */
+let photoMode = false;
+let currentPhoto = null; // { dataUrl, frame }
+const photoHistory = []; // 新しい順
+
+function showPhoto(entry) {
+  currentPhoto = entry;
+  photoMode = true;
+  stopTracking(true);
+  const img = $('photo');
+  img.src = entry.dataUrl;
+  img.classList.remove('hidden');
+  video.classList.add('hidden'); // 映像は隠すがストリームは生かし、撮り直しを速くする
+  $('photo-bar').classList.remove('hidden');
+  $('status-chip').textContent = '写真を表示中';
+  renderPhotoThumbs();
+}
+
+function exitPhoto() {
+  photoMode = false;
+  currentPhoto = null;
+  $('photo').classList.add('hidden');
+  $('photo').removeAttribute('src');
+  video.classList.remove('hidden');
+  $('photo-bar').classList.add('hidden');
+  $('status-chip').textContent = stream ? 'カメラ起動中（背面）' : 'カメラ未起動';
+  renderPhotoThumbs();
+}
+
+function addPhotoHistory(entry) {
+  photoHistory.unshift(entry);
+  if (photoHistory.length > 20) photoHistory.length = 20;
+  $('photo-history').classList.remove('hidden');
+  renderPhotoThumbs();
+}
+
+function renderPhotoThumbs() {
+  const box = $('photo-thumbs');
+  box.innerHTML = '';
+  for (const entry of photoHistory) {
+    const t = document.createElement('img');
+    t.src = entry.dataUrl;
+    t.alt = '撮った写真';
+    if (entry === currentPhoto) t.className = 'active';
+    t.addEventListener('click', () => showPhoto(entry));
+    box.appendChild(t);
+  }
+}
+
+function takePhoto() {
+  if (!stream) return;
+  const frame = captureFrame();
+  const entry = { dataUrl: `data:${frame.mimeType};base64,${frame.data}`, frame };
+  addPhotoHistory(entry);
+  showPhoto(entry);
+}
+
+function loadPhotoFile(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    const scale = Math.min(1, 1280 / (img.naturalWidth || 1280));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    c.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url);
+    const dataUrl = c.toDataURL('image/jpeg', 0.85);
+    const frame = { mimeType: 'image/jpeg', data: dataUrl.split(',')[1], bytes: Math.floor(dataUrl.length * 0.75) };
+    const entry = { dataUrl, frame };
+    addPhotoHistory(entry);
+    showPhoto(entry);
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); $('status-chip').textContent = '写真を読み込めませんでした'; };
+  img.src = url;
+}
+
+// 静止画は object-fit: contain で全体表示されるため、写真内の座標(0〜1)を
+// ステージ内の表示矩形に合わせて変換する（レターボックス分の補正）
+function photoStageTransform() {
+  const img = $('photo');
+  const stage = $('stage');
+  const W = stage.clientWidth || 1, H = stage.clientHeight || 1;
+  const iw = img.naturalWidth || W, ih = img.naturalHeight || H;
+  const s = Math.min(W / iw, H / ih);
+  const dw = iw * s, dh = ih * s, ox = (W - dw) / 2, oy = (H - dh) / 2;
+  return (u, v) => ({ fx: (ox + u * dw) / W, fy: (oy + v * dh) / H });
 }
 
 /* ---------- 音声入力（語り手の声） ---------- */
@@ -135,10 +230,13 @@ function placeTags(tags) {
   const halfH = 5 * Math.tan(THREE.MathUtils.degToRad(cam3d.fov / 2));
   const halfW = halfH * cam3d.aspect;
   const placed = [];
+  // 写真モードでは静止画の表示矩形に合わせて座標を補正する（ライブは恒等変換）
+  const toStage = photoMode ? photoStageTransform() : (u, v) => ({ fx: u, fy: v });
   tags.forEach((tag, i) => {
     // AIが返した画像内座標(0〜1)を NDC 経由で空間にピン留めする（固定カメラ近似）
-    const ax = (tag.x - 0.5) * 4.6;
-    const ay = (0.5 - tag.y) * 3.4;
+    const { fx, fy } = toStage(tag.x, tag.y);
+    const ax = (fx - 0.5) * 4.6;
+    const ay = (0.5 - fy) * 3.4;
     const anchor = new THREE.Group();
     anchor.position.set(ax, ay, 0);
 
@@ -174,11 +272,13 @@ function placeTags(tags) {
     anchor.add(floatGroup);
 
     tagGroup.add(anchor);
-    placed.push({ anchor, label, line, labelX, lineTopY: Math.max(0.09, labelDy - 0.21), u: tag.x, v: tag.y, tag, idx: i });
+    placed.push({ anchor, label, line, labelX, lineTopY: Math.max(0.09, labelDy - 0.21), u: fx, v: fy, tag, idx: i });
   });
   gyroGroup.add(tagGroup);
   placedTags = placed;
-  initTrackers(placed);
+  // 写真モードではラベルを1回配置するだけ（NCC追跡はライブ専用）
+  if (photoMode) stopTracking(true);
+  else initTrackers(placed);
 }
 
 /* ---------- 視覚トラッキング（テンプレートマッチング） ----------
@@ -456,11 +556,20 @@ async function runTranslate() {
   const useDemo = $('chk-demo').checked;
   const transcript = $('transcript').value.trim();
   $('btn-translate').disabled = true;
+  $('btn-photo-translate').disabled = true;
   $('status-chip').textContent = '拡張翻訳中…';
   let frame = { mimeType: 'image/jpeg', data: '', bytes: 0 };
-  if (stream && !useDemo) frame = captureFrame();
-  // 追跡用に、撮影時点の映像を作業解像度グレースケールで控える
-  captureGray = stream && !useDemo ? grabGray() : null;
+  captureGray = null;
+  if (!useDemo) {
+    if (photoMode && currentPhoto) {
+      // 写真モード: 選択中の静止画をそのまま翻訳する（追跡用の控えは作らない）
+      frame = currentPhoto.frame;
+    } else if (stream) {
+      frame = captureFrame();
+      // 追跡用に、撮影時点の映像を作業解像度グレースケールで控える
+      captureGray = grabGray();
+    }
+  }
 
   try {
     const result = useDemo ? { ...MOCK_RESULT, source: 'demo' } : await extendedTranslate(frame, transcript);
@@ -470,6 +579,7 @@ async function runTranslate() {
     $('status-chip').textContent = 'エラー: ' + e.message;
   } finally {
     $('btn-translate').disabled = false;
+    $('btn-photo-translate').disabled = false;
   }
 }
 
@@ -587,3 +697,12 @@ $('btn-camera').addEventListener('click', toggleCamera);
 updateCameraButton();
 $('btn-record').addEventListener('click', toggleRecord);
 $('btn-translate').addEventListener('click', runTranslate);
+$('btn-shutter').addEventListener('click', takePhoto);
+$('btn-pick').addEventListener('click', () => $('file-photo').click());
+$('file-photo').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) loadPhotoFile(f);
+  e.target.value = '';
+});
+$('btn-photo-translate').addEventListener('click', runTranslate);
+$('btn-photo-retake').addEventListener('click', exitPhoto);

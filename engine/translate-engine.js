@@ -17,16 +17,26 @@
  *   語り手個人の事情の創作は禁止）。
  *
  * Gemini キーが無ければモック（チャイのデモデータ）を返す。
- * モデルフォールバックは HowLink と同じ方式（3.x系から試行、404/429/503で次へ）。
+ * モデルフォールバックは HowLink の「見せる」高速化と同じ処方:
+ * 軽量モデル（lite）を先頭に試し、モデルごとのタイムアウトと全体デッドラインで
+ * 応答の遅いモデルに引きずられないようにする。404/429/503 とタイムアウトで次へ。
  */
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MODEL_CANDIDATES = [
+  'gemini-3.5-flash-lite',
   'gemini-3.5-flash',
   'gemini-3-flash-preview',
   'gemini-flash-latest',
   'gemini-2.5-flash',
 ];
+// モデルごとのタイムアウト(ms)。MODEL_CANDIDATES と同じ順序。
+// CultureLens は日英バイリンガルJSON（maxOutputTokens 3200）を返す重い呼び出しのため、
+// HowLink の処方（[8000, 9000, 5000, 4000]）より各値を長めに取る:
+// 先頭の lite は「速さ優先だが生成量は多い」ので 12s、2番手 flash は品質本命として 15s、
+// 後段は保険として短めにし、全体デッドライン 45s で必ず打ち切る。
+const MODEL_TIMEOUTS_MS = [12000, 15000, 10000, 8000, 10000];
+const OVERALL_DEADLINE_MS = 45000;
 const KEY_STORAGE = 'etw_gemini_api_key';
 const MODEL_STORAGE = 'etw_gemini_model';
 
@@ -74,32 +84,40 @@ export const MOCK_RESULT = {
   source: 'mock',
 };
 
-function orderedModels() {
-  const saved = localStorage.getItem(MODEL_STORAGE);
-  if (saved && MODEL_CANDIDATES.includes(saved)) return [saved, ...MODEL_CANDIDATES.filter(m => m !== saved)];
-  return MODEL_CANDIDATES;
-}
-
-async function callModel(model, key, parts) {
+async function callModel(model, key, parts, timeoutMs) {
   const body = {
     contents: [{ role: 'user', parts }],
     generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 3200, thinkingConfig: { thinkingBudget: 0 } },
   };
-  const res = await fetch(`${API_BASE}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let detail = '';
-    try { detail = (await res.json())?.error?.message || ''; } catch { /* noop */ }
-    const err = new Error(`Gemini API error: ${res.status} ${detail}`);
-    err.status = res.status;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json())?.error?.message || ''; } catch { /* noop */ }
+      const err = new Error(`Gemini API error: ${res.status} ${detail}`);
+      err.status = res.status;
+      throw err;
+    }
+    const data = await res.json();
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const parsed = JSON.parse(raw);
+    parsed.source = `gemini (${model})`;
+    return parsed;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      const e = new Error(`Gemini timeout: ${model} (${timeoutMs}ms)`);
+      e.timeout = true;
+      throw e;
+    }
     throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  const data = await res.json();
-  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-  const parsed = JSON.parse(raw);
-  parsed.source = `gemini (${model})`;
-  return parsed;
 }
 
 /**
@@ -114,16 +132,24 @@ export async function extendedTranslate(frame, transcript) {
     { text: `${EXTENDED_TRANSLATION_PROMPT}\n\n語り手の言葉（日本語）: ${transcript || '（言葉なし）'}` },
     { inline_data: { mime_type: frame.mimeType, data: frame.data } },
   ];
+  // 毎回 lite-first の順序で先頭から試す（HowLink の saveModel:false と同じ考え方）。
+  // 成功したモデルは MODEL_STORAGE に「記録」だけし、次回の開始モデルには使わない
+  // （重いモデルが保存されていると、毎回そのモデルから始まって遅くなるため）。
+  const deadline = Date.now() + OVERALL_DEADLINE_MS;
   let lastError = null;
-  for (const model of orderedModels()) {
+  for (let i = 0; i < MODEL_CANDIDATES.length; i++) {
+    const remain = deadline - Date.now();
+    if (remain <= 0) break;
+    const model = MODEL_CANDIDATES[i];
     try {
-      const out = await callModel(model, key, parts);
+      const out = await callModel(model, key, parts, Math.min(MODEL_TIMEOUTS_MS[i], remain));
       localStorage.setItem(MODEL_STORAGE, model);
       return out;
     } catch (err) {
       lastError = err;
+      if (err.timeout) continue;
       if (![404, 429, 503].includes(err.status)) throw err;
     }
   }
-  throw lastError;
+  throw lastError || new Error('拡張翻訳がタイムアウトしました');
 }
