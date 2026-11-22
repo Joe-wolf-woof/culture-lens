@@ -5,7 +5,7 @@
  * 出力: 字幕 + Three.js 空間タグピン
  */
 import * as THREE from 'three';
-import { extendedTranslate, getApiKey, setApiKey, MOCK_RESULT } from './engine/translate-engine.js?v=20261122-2';
+import { extendedTranslate, getApiKey, setApiKey, MOCK_RESULT } from './engine/translate-engine.js?v=20261122-3';
 
 const $ = (id) => document.getElementById(id);
 const video = $('camera');

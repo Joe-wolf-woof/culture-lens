@@ -114,7 +114,14 @@ async function callModel(model, key, parts, timeoutMs) {
     });
     if (!res.ok) {
       let detail = '';
-      try { detail = (await res.json())?.error?.message || ''; } catch { /* noop */ }
+      try {
+        const ej = (await res.json())?.error;
+        detail = ej?.message || '';
+        // 400 の message は「Request contains an invalid argument.」だけで項目名を含まないため、
+        // details 側の fieldViolations があれば併記して原因項目が分かるようにする
+        const fv = (ej?.details || []).flatMap((d) => d.fieldViolations || []).map((v) => `${v.field}: ${v.description}`).join('; ');
+        if (fv) detail += ` [${fv}]`;
+      } catch { /* noop */ }
       const err = new Error(`Gemini API error: ${res.status} ${detail}`);
       err.status = res.status;
       throw err;
