@@ -19,7 +19,16 @@
  * Gemini キーが無ければモック（チャイのデモデータ）を返す。
  * モデルフォールバックは HowLink の「見せる」高速化と同じ処方:
  * 軽量モデル（lite）を先頭に試し、モデルごとのタイムアウトと全体デッドラインで
- * 応答の遅いモデルに引きずられないようにする。404/429/503 とタイムアウトで次へ。
+ * 応答の遅いモデルに引きずられないようにする。400/404/429/503 とタイムアウトで次へ。
+ *
+ * 【再発防止】thinking 制御のパラメータはモデル世代で異なる（混在させると 400）:
+ * - Gemini 3 系（gemini-3* / gemini-flash-latest）→ thinkingLevel を使う。
+ *   2.5 系の thinkingBudget を送ると、モデルにより 400 INVALID_ARGUMENT になる
+ *   （2026-11-22 実機で gemini-3.5-flash-lite が thinkingBudget: 0 を拒否し、
+ *   当時の即時 throw のためフォールバックも効かず全体が失敗した）。
+ * - Gemini 2.5 系 → thinkingBudget を使う。thinkingLevel を送ると 400 になる。
+ * 世代の判定は thinkingConfigFor() に集約してある。パラメータを一律に送らないこと。
+ * また、モデルごとの仕様差は今後も起こりうるため、400 でも次のモデルへ進む。
  */
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -84,10 +93,17 @@ export const MOCK_RESULT = {
   source: 'mock',
 };
 
+// thinking 制御は世代ごとに片方だけを送る（両方送る／違う世代のものを送ると 400）。
+function thinkingConfigFor(model) {
+  if (model.includes('2.5')) return { thinkingBudget: 0 }; // Gemini 2.5 系
+  if (model.startsWith('gemini-3') || model === 'gemini-flash-latest') return { thinkingLevel: 'minimal' }; // Gemini 3 系
+  return { thinkingLevel: 'minimal' }; // 未知のモデルは現行世代（3系）側に倒す
+}
+
 async function callModel(model, key, parts, timeoutMs) {
   const body = {
     contents: [{ role: 'user', parts }],
-    generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 3200, thinkingConfig: { thinkingBudget: 0 } },
+    generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 3200, thinkingConfig: thinkingConfigFor(model) },
   };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -148,7 +164,9 @@ export async function extendedTranslate(frame, transcript) {
     } catch (err) {
       lastError = err;
       if (err.timeout) continue;
-      if (![404, 429, 503].includes(err.status)) throw err;
+      // 400 も次へ: モデルごとのパラメータ仕様差（thinkingConfig 等）で 400 になっても、
+      // 他のモデルなら通ることがあるため、1モデルの 400 で全体を落とさない。
+      if (![400, 404, 429, 503].includes(err.status)) throw err;
     }
   }
   throw lastError || new Error('拡張翻訳がタイムアウトしました');
