@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>拡張翻訳 - CultureLens（MVP）</title>
-<link rel="stylesheet" href="css/style.css?v=20261122-1">
+<link rel="stylesheet" href="css/style.css?v=20261122-4">
 <script type="importmap">
 { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
 </script>
@@ -24,14 +24,16 @@
     <div id="subtitle-original" class="sub-original"></div>
     <div id="subtitle-extended" class="sub-extended"></div>
   </div>
-  <div id="photo-bar" class="hidden">
-    <button id="btn-photo-translate" class="accent">🌐 この写真で拡張翻訳</button>
-    <button id="btn-photo-retake">↩ 撮り直す／選び直す</button>
-  </div>
   <div id="status-chip">カメラ未起動</div>
   <button id="btn-toggle-result" title="翻訳結果の表示/非表示">💬 翻訳を表示/非表示にする</button>
   <button id="btn-lang" title="表示言語の切り替え（英語／日本語）"><b>EN</b> / あ</button>
 </section>
+
+<!-- 写真モードの操作（案A: ステージの外に出し、字幕と重ならないようにする） -->
+<div id="photo-bar" class="hidden">
+  <button id="btn-photo-translate" class="accent">🌐 この写真で拡張翻訳</button>
+  <button id="btn-photo-retake">↩ 撮り直す／選び直す</button>
+</div>
 
 <!-- 入力コントロール -->
 <section class="panel controls">
